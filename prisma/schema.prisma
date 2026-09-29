@@ -1,0 +1,327 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  ADMIN
+  TEACHER
+  STUDENT
+  HOSPITAL_TUTOR
+}
+
+enum StudentStatus {
+  ACTIVE
+  SUSPENDED
+  GRADUATED
+  TRANSFERRED
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT_JUSTIFIED
+  ABSENT_UNJUSTIFIED
+  LATE
+}
+
+enum ValidationStatus {
+  VALIDATED      // Note >= 10/20
+  CATCH_UP       // 7 <= Note < 10 (Session de rattrapage)
+  FAILED         // Note < 7 ou absence éliminatoire
+  PENDING
+}
+
+enum RoomType {
+  AMPHITHEATER
+  CLASSROOM
+  SIMULATION_LAB
+  HOSPITAL_WARD
+}
+
+enum SkillLevel {
+  NOT_ACQUIRED
+  IN_PROGRESS
+  ACQUIRED
+  EXCELLENT
+}
+
+// -----------------------------------------------------------------------------
+// UTILISATEURS ET PROFILS (RBAC)
+// -----------------------------------------------------------------------------
+
+model User {
+  id            String    @id @default(cuid())
+  matricule     String    @unique // Ex: ETU-2024-0012 ou PRF-2024-0005
+  email         String    @unique
+  passwordHash  String
+  firstName     String
+  lastName      String
+  cin           String?   @unique // Carte d'Identité Nationale (Maroc)
+  phone         String?
+  avatarUrl     String?
+  role          Role      @default(STUDENT)
+  isActive      Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Profils spécifiques
+  studentProfile StudentProfile?
+  teacherProfile TeacherProfile?
+
+  // Relations d'audit et de création
+  createdNews    News[]
+  createdSlots   TimetableSlot[]
+}
+
+model StudentProfile {
+  id               String        @id @default(cuid())
+  userId           String        @unique
+  user             User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cneMassar        String?       @unique // Code Massar pour étudiants marocains
+  promotionYear    Int           // Ex: 2024
+  status           StudentStatus @default(ACTIVE)
+  currentFiliereId String
+  filiere          Filiere       @relation(fields: [currentFiliereId], references: [id])
+  currentSemester  String        // Ex: "S3"
+  
+  // Relations pédagogiques
+  grades           Grade[]
+  attendances      Attendance[]
+  clinicalLogs     ClinicalInternshipLog[]
+  skillEvaluations ClinicalSkillEvaluation[]
+
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+}
+
+model TeacherProfile {
+  id               String        @id @default(cuid())
+  userId           String        @unique
+  user             User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  specialty        String        // Ex: "Soins Intensifs", "Anesthésiologie"
+  gradeUniversitaire String?     // Ex: "Professeur Habilité", "Docteur en Médecine"
+  department       String        // Ex: "Sciences Fondamentales & Soins"
+  
+  // Enseignements coordonnés
+  coordinatedModules Module[]    @relation("ModuleCoordinator")
+  coursesTaught      CourseElement[]
+  timetableSlots     TimetableSlot[]
+  givenGrades        Grade[]
+  skillAssessments   ClinicalSkillEvaluation[]
+
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+}
+
+// -----------------------------------------------------------------------------
+// STRUCTURE ACADÉMIQUE (CURRICULUM LMD)
+// -----------------------------------------------------------------------------
+
+model Filiere {
+  id          String           @id @default(cuid())
+  code        String           @unique // Ex: "IP", "IAR", "ISUSI", "SF"
+  name        String           // Ex: "Infirmier Polyvalent"
+  description String           @db.Text
+  degree      String           // "Licence Professionnelle", "Master"
+  durationYears Int            @default(3)
+  students    StudentProfile[]
+  modules     Module[]
+
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+}
+
+model Module {
+  id             String          @id @default(cuid())
+  code           String          @unique // Ex: "M301"
+  name           String          // Ex: "Sciences Biologiques & Pharmacologie Clinique"
+  semester       String          // "S1", "S2", "S3", "S4", "S5", "S6"
+  creditsEcts    Int             @default(5)
+  filiereId      String
+  filiere        Filiere         @relation(fields: [filiereId], references: [id], onDelete: Cascade)
+  
+  coordinatorId  String?
+  coordinator    TeacherProfile? @relation("ModuleCoordinator", fields: [coordinatorId], references: [id])
+
+  elements       CourseElement[]
+  grades         Grade[]
+
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+}
+
+model CourseElement {
+  id             String          @id @default(cuid())
+  code           String          @unique // Ex: "E301-A"
+  name           String          // Ex: "Pharmacologie des Urgences"
+  moduleId       String
+  module         Module          @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  
+  teacherId      String?
+  teacher        TeacherProfile? @relation(fields: [teacherId], references: [id])
+
+  hoursLecture   Int             @default(20) // Heures Cours Magistral
+  hoursTutorial  Int             @default(10) // Heures TD
+  hoursPractical Int             @default(15) // Heures TP Simulation
+
+  timetableSlots TimetableSlot[]
+  attendances    Attendance[]
+
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+}
+
+// -----------------------------------------------------------------------------
+// ÉVALUATIONS, NOTES & CALCULS DE MOYENNES
+// -----------------------------------------------------------------------------
+
+model Grade {
+  id                String           @id @default(cuid())
+  studentId         String
+  student           StudentProfile   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  moduleId          String
+  module            Module           @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  evaluatorId       String
+  evaluator         TeacherProfile   @relation(fields: [evaluatorId], references: [id])
+
+  // Composantes de notes sur 20
+  continuousAssessment Float?        // Contrôle Continu (CC) - Coeff 30%
+  practicalAssessment  Float?        // TP / Simulation Clinique - Coeff 30%
+  finalExam            Float?        // Examen Final (Session Normale) - Coeff 40%
+  catchUpExam          Float?        // Examen Session de Rattrapage
+
+  moduleFinalGrade     Float?        // Moyenne générale calculée
+  status               ValidationStatus @default(PENDING)
+  remarks              String?       @db.Text
+
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  @@unique([studentId, moduleId])
+}
+
+// -----------------------------------------------------------------------------
+// ASSIDUITÉ & SUIVI DISCIPLINAIRE (ALERTE > 15%)
+// -----------------------------------------------------------------------------
+
+model Attendance {
+  id              String           @id @default(cuid())
+  studentId       String
+  student         StudentProfile   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  courseElementId String
+  courseElement   CourseElement    @relation(fields: [courseElementId], references: [id], onDelete: Cascade)
+  
+  sessionDate     DateTime
+  status          AttendanceStatus @default(PRESENT)
+  justification   String?          @db.Text
+  isFlaggedAlert  Boolean          @default(false) // Vrai si le taux cumulé dépasse 15%
+
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@index([studentId, sessionDate])
+}
+
+// -----------------------------------------------------------------------------
+// EMPLOI DU TEMPS (TIMETABLE ENGINE & ROOMS)
+// -----------------------------------------------------------------------------
+
+model Room {
+  id          String          @id @default(cuid())
+  name        String          @unique // Ex: "Amphi Ibn Sina", "Lab Simulation 02"
+  capacity    Int
+  type        RoomType        @default(CLASSROOM)
+  equipment   String?         // Ex: "Mannequin Haute-Fidélité, Moniteur Multiparamétrique"
+  slots       TimetableSlot[]
+}
+
+model TimetableSlot {
+  id              String         @id @default(cuid())
+  courseElementId String
+  courseElement   CourseElement  @relation(fields: [courseElementId], references: [id], onDelete: Cascade)
+  teacherId       String
+  teacher         TeacherProfile @relation(fields: [teacherId], references: [id])
+  roomId          String
+  room            Room           @relation(fields: [roomId], references: [id])
+  
+  dayOfWeek       Int            // 1 = Lundi, 2 = Mardi, ..., 6 = Samedi
+  startTime       String         // Format "HH:mm" Ex: "08:30"
+  endTime         String         // Format "HH:mm" Ex: "10:30"
+  targetGroup     String         // Ex: "IP-Promo2024-GroupeA"
+  isCatchUpSession Boolean       @default(false) // Séance de rattrapage spéciale
+  notes           String?
+
+  createdById     String
+  createdBy       User           @relation(fields: [createdById], references: [id])
+
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([roomId, dayOfWeek, startTime])
+  @@index([teacherId, dayOfWeek, startTime])
+}
+
+// -----------------------------------------------------------------------------
+// INNOVATION : CARNET DE STAGE NUMÉRIQUE & CLINICAL READINESS
+// -----------------------------------------------------------------------------
+
+model ClinicalInternshipLog {
+  id              String        @id @default(cuid())
+  studentId       String
+  student         StudentProfile @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  hospitalName    String        // Ex: "CHU Ibn Sina - Service Réanimation Polyvalente"
+  wardDepartment  String        // Ex: "Soins Intensifs Cardiaques"
+  dateStart       DateTime
+  dateEnd         DateTime
+  totalHoursDone  Int           @default(0) // Cumul d'heures de garde validées
+  mentorName      String        // Nom du tuteur hospitalier / Cadre de santé
+  mentorFeedback  String?       @db.Text
+  isSignedOff     Boolean       @default(false)
+
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+}
+
+model ClinicalSkillEvaluation {
+  id             String         @id @default(cuid())
+  studentId      String
+  student        StudentProfile @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  evaluatorId    String
+  evaluator      TeacherProfile @relation(fields: [evaluatorId], references: [id])
+  
+  skillCategory  String         // Ex: "Asepsie & Hygiène", "Gestes d'Urgence", "Empathie & Relation Soignant"
+  skillName      String         // Ex: "Pose de voie veineuse périphérique sous asepsie stricte"
+  level          SkillLevel     @default(NOT_ACQUIRED)
+  confidentialRemark String?    @db.Text // Réservé à l'équipe pédagogique et délibération
+
+  evaluatedAt    DateTime       @default(now())
+
+  @@index([studentId, skillCategory])
+}
+
+// -----------------------------------------------------------------------------
+// ACTUALITÉS, ANNONCES & HUBS DE COMMUNICATION
+// -----------------------------------------------------------------------------
+
+model News {
+  id          String    @id @default(cuid())
+  title       String
+  slug        String    @unique
+  summary     String
+  content     String    @db.Text
+  category    String    // "Général", "Stages Cliniques", "Examens", "Événements"
+  imageUrl    String?
+  publishedAt DateTime  @default(now())
+  isPinned    Boolean   @default(false)
+  readTimeMin Int       @default(3)
+
+  authorId    String
+  author      User      @relation(fields: [authorId], references: [id])
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
